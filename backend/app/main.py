@@ -1,0 +1,231 @@
+from fastapi import Depends, FastAPI, HTTPException
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session
+from datetime import datetime
+from pwdlib import PasswordHash
+from sqlalchemy.exc import IntegrityError
+
+from app.database import get_db
+from app.models import (
+    CollectionEntry,
+    CollectionStatus,
+    Game,
+    OwnershipType,
+    PlayStatus,
+    User
+)
+
+password_hash = PasswordHash.recommended()
+
+app = FastAPI(title="GameVault API")
+
+class GameResponse(BaseModel):
+    id: int
+    title: str
+    platform: str
+
+
+class UserCreate(BaseModel):
+    email: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=8, max_length=128)
+
+class UserResponse(BaseModel):
+    id: int
+    email: str
+    created_at: datetime
+
+class GameCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    platform: str = Field(min_length=1, max_length=100)
+
+    @field_validator("title", "platform")
+    @classmethod
+    def reject_blank_strings(cls, value: str) -> str:
+        return clean_nonblank_string(value)
+
+
+class GameUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    platform: str = Field(min_length=1, max_length=100)
+
+    @field_validator("title", "platform")
+    @classmethod
+    def reject_blank_strings(cls, value: str) -> str:
+        return clean_nonblank_string(value)
+
+class CollectionEntryCreate(BaseModel):
+    user_id: int
+    game_id: int
+    collection_status: CollectionStatus
+    ownership_type: OwnershipType | None = None
+    play_status: PlayStatus
+
+class CollectionEntryResponse(BaseModel):
+    id: int
+    user_id: int
+    game_id: int
+    collection_status: CollectionStatus
+    ownership_type: OwnershipType | None
+    play_status: PlayStatus
+    
+
+
+def clean_nonblank_string(value: str) -> str:
+    if not value.strip():
+        raise ValueError("This field cannot be blank")
+
+    return value.strip()
+
+
+@app.get("/")
+def root():
+    return {"message" : "Welcome to GameVault"}
+
+
+@app.get("/games", response_model=list[GameResponse])
+def get_games(db: Session = Depends(get_db)):
+    result = db.scalars(select(Game)).all()
+    return result
+
+@app.get("/games/{game_id}", response_model=GameResponse)
+def get_game(
+    game_id: int,
+    db: Session = Depends(get_db),
+):
+    game = db.get(Game, game_id)
+
+    if game is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    return game 
+
+@app.post("/games", response_model=GameResponse, status_code=201)
+def create_game(
+    game_data: GameCreate,
+    db: Session = Depends(get_db),
+):
+    new_game = Game(
+        title=game_data.title,
+        platform=game_data.platform,
+    )
+
+    db.add(new_game)
+    db.commit()
+    db.refresh(new_game)
+
+    return new_game
+
+@app.put("/games/{game_id}", response_model=GameResponse)
+def update_game(
+    game_id: int,
+    game_data: GameUpdate,
+    db: Session = Depends(get_db),
+):
+
+    game = db.get(Game, game_id)
+
+    if game is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    game.title = game_data.title
+    game.platform = game_data.platform
+
+    db.commit()
+    db.refresh(game)
+
+    return game
+
+@app.delete("/games/{game_id}", status_code=204)
+def delete_game(
+    game_id:int,
+    db: Session = Depends(get_db),
+):
+
+    game = db.get(Game, game_id)
+
+    if game is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    db.delete(game)
+    db.commit()
+
+@app.post(
+    "/collection-entries",
+    response_model=CollectionEntryResponse,
+    status_code=201,
+)
+def create_collection_entry(
+    entry: CollectionEntryCreate,
+    db: Session = Depends(get_db),
+):
+    user = db.get(User, entry.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    game = db.get(Game, entry.game_id)
+    if game is None:
+        raise HTTPException(status_code=404, detail="Game not found")
+
+    if (
+        entry.collection_status == CollectionStatus.OWNED
+        and entry.ownership_type is None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Owned entries must have an ownership type",
+        )
+
+    if (
+        entry.collection_status == CollectionStatus.WISHLIST
+        and entry.ownership_type is not None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Wishlist entries cannot have an ownership type",
+        )
+
+    new_entry = CollectionEntry(
+        user_id=entry.user_id,
+        game_id=entry.game_id,
+        collection_status=entry.collection_status,
+        ownership_type=entry.ownership_type,
+        play_status=entry.play_status,
+    )
+
+    db.add(new_entry)
+
+    #catches all integrity errors, meh code make specific when more integrity errors can occur
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="This game is already in the user's collection",
+        )
+
+    db.refresh(new_entry)
+    return new_entry
+
+@app.post("/users", response_model=UserResponse, status_code=201)
+def create_user(user: UserCreate, db: Session = Depends(get_db)):
+    new_user = User(
+        email=user.email.strip().lower(),
+        password_hash=password_hash.hash(user.password),
+    )
+
+    db.add(new_user)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="A user with this email already exists",
+        )
+
+    db.refresh(new_user)
+    return new_user
+
