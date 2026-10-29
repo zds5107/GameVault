@@ -1,10 +1,14 @@
+import os
+from datetime import datetime, timedelta, timezone
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 from datetime import datetime
 from pwdlib import PasswordHash
 from sqlalchemy.exc import IntegrityError
+import jwt
 
 from app.database import get_db
 from app.models import (
@@ -18,6 +22,54 @@ from app.models import (
 
 password_hash = PasswordHash.recommended()
 
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+JWT_ALGORITHM = "HS256"
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+if not JWT_SECRET_KEY:
+    raise RuntimeError("JWT_SECRET_KEY is not configured")
+
+bearer_scheme = HTTPBearer()
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    token = credentials.credentials
+
+    try:
+        payload = jwt.decode(
+            token,
+            JWT_SECRET_KEY,
+            algorithms=[JWT_ALGORITHM],
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user_id = payload.get("sub")
+
+    if not isinstance(user_id, str) or not user_id.isdigit():
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = db.get(User, int(user_id))
+
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    return user
+
 app = FastAPI(title="GameVault API")
 
 class GameResponse(BaseModel):
@@ -29,6 +81,10 @@ class GameResponse(BaseModel):
 class UserCreate(BaseModel):
     email: str = Field(min_length=3, max_length=255)
     password: str = Field(min_length=8, max_length=128)
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
 
 class UserResponse(BaseModel):
     id: int
@@ -55,7 +111,6 @@ class GameUpdate(BaseModel):
         return clean_nonblank_string(value)
 
 class CollectionEntryCreate(BaseModel):
-    user_id: int
     game_id: int
     collection_status: CollectionStatus
     ownership_type: OwnershipType | None = None
@@ -81,6 +136,14 @@ def clean_nonblank_string(value: str) -> str:
 @app.get("/")
 def root():
     return {"message" : "Welcome to GameVault"}
+
+@app.get("/me", response_model=UserResponse)
+def read_current_user(
+    current_user: User = Depends(get_current_user)
+):
+    return current_user
+
+
 
 
 @app.get("/games", response_model=list[GameResponse])
@@ -157,11 +220,9 @@ def delete_game(
 )
 def create_collection_entry(
     entry: CollectionEntryCreate,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    user = db.get(User, entry.user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
 
     game = db.get(Game, entry.game_id)
     if game is None:
@@ -186,7 +247,7 @@ def create_collection_entry(
         )
 
     new_entry = CollectionEntry(
-        user_id=entry.user_id,
+        user_id=current_user.id,
         game_id=entry.game_id,
         collection_status=entry.collection_status,
         ownership_type=entry.ownership_type,
@@ -228,4 +289,37 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
 
     db.refresh(new_user)
     return new_user
+
+@app.post("/login")
+def login(credentials: LoginRequest, db: Session = Depends(get_db)):
+    email = credentials.email.strip().lower()
+
+    user = db.scalar(
+        select(User).where(User.email == email)
+    )
+
+    if user is None or not password_hash.verify(
+        credentials.password,
+        user.password_hash,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password"
+        )
+
+    access_token = jwt.encode(
+        {
+            "sub": str(user.id),
+            "exp": datetime.now(timezone.utc)
+            + timedelta(minutes=JWT_ACCESS_TOKEN_EXPIRE_MINUTES),
+        },
+        JWT_SECRET_KEY,
+        algorithm=JWT_ALGORITHM,
+    )
+    
+
+    return {
+    "access_token": access_token,
+    "token_type": "bearer",
+    }
 

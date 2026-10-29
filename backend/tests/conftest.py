@@ -1,11 +1,10 @@
-
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import database_url, get_db
-from app.main import app
+from app.main import app, password_hash
 from app.models import Base, Game, User
 
 
@@ -51,7 +50,7 @@ def client(db_session):
 def user_and_game(db_session):
     user = User(
         email="fixture@example.com",
-        password_hash="test-hash",
+        password_hash=password_hash.hash("test-password"),
     )
 
     game = Game(
@@ -66,3 +65,37 @@ def user_and_game(db_session):
     db_session.refresh(game)
 
     return user, game
+
+
+@pytest.fixture
+def second_user(db_session):
+    user = User(
+        email="fixture2@example.com",
+        password_hash=password_hash.hash("test-password2"),
+    )
+
+
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+
+    return user
+
+@pytest.fixture
+def authenticated_client(client, user_and_game):
+    user, game = user_and_game
+    
+    response = client.post(
+        "/login",
+        json={
+            "email": user.email,
+            "password": "test-password",
+        },
+    )
+
+    assert response.status_code == 200
+
+    token = response.json()["access_token"]
+    client.headers["Authorization"] = f"Bearer {token}"
+
+    return client
