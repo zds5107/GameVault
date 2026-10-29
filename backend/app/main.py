@@ -118,11 +118,12 @@ class CollectionEntryCreate(BaseModel):
 
 class CollectionEntryResponse(BaseModel):
     id: int
-    user_id: int
     game_id: int
+    user_id: int
     collection_status: CollectionStatus
     ownership_type: OwnershipType | None
     play_status: PlayStatus
+    game: GameResponse
     
 
 
@@ -289,6 +290,15 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
 
     db.refresh(new_user)
     return new_user
+
+
+@app.get("/collection-entries", response_model=list[CollectionEntryResponse])
+def get_collection_entries(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    results = db.scalars(select(CollectionEntry).where(CollectionEntry.user_id == current_user.id)).all()
+
+    return results
+
+
 
 @app.post("/login")
 def login(credentials: LoginRequest, db: Session = Depends(get_db)):

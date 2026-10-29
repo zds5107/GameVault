@@ -7,7 +7,7 @@ from sqlalchemy import (
     CheckConstraint,
     Enum as SQLAlchemyEnum
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from datetime import datetime, timezone
 from enum import Enum
 
@@ -74,6 +74,8 @@ class CollectionEntry(Base):
         ForeignKey("games.id"),
         nullable=False,
     )
+
+    game: Mapped["Game"] = relationship()
 
     collection_status: Mapped[CollectionStatus] = mapped_column(
         SQLAlchemyEnum(

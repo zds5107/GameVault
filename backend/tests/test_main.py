@@ -1,5 +1,5 @@
 from sqlalchemy import select, func
-from app.models import CollectionEntry
+from app.models import CollectionEntry, Game
 
 def test_root_returns_welcome_message(client):
     response = client.get("/")
@@ -448,4 +448,20 @@ def test_create_collection_entry_uses_authenticated_user_id(authenticated_client
     assert response.status_code == 201
     assert response.json()["user_id"] == user1.id
     assert response.json()["user_id"] != user2.id
+
+def test_collection_entry_game_relationship(db_session, user_and_game):
+    user, game = user_and_game
+
+    entry = CollectionEntry(
+        user_id=user.id,
+        game_id=game.id,
+        collection_status="owned",
+        ownership_type="physical",
+        play_status="unplayed",
+    )
+
+    db_session.add(entry)
+    db_session.commit()  
+
+    assert entry.game.title == game.title
 
