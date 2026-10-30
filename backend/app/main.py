@@ -3,9 +3,8 @@ from datetime import datetime, timedelta, timezone
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select, text
+from sqlalchemy import select, exists
 from sqlalchemy.orm import Session
-from datetime import datetime
 from pwdlib import PasswordHash
 from sqlalchemy.exc import IntegrityError
 import jwt
@@ -116,6 +115,11 @@ class CollectionEntryCreate(BaseModel):
     ownership_type: OwnershipType | None = None
     play_status: PlayStatus
 
+class CollectionEntryUpdate(BaseModel):
+    collection_status: CollectionStatus = None
+    ownership_type: OwnershipType | None = None
+    play_status: PlayStatus = None
+
 class CollectionEntryResponse(BaseModel):
     id: int
     game_id: int
@@ -211,8 +215,21 @@ def delete_game(
     if game is None:
         raise HTTPException(status_code=404, detail="Game not found")
 
+    game_is_referenced = db.scalar(
+        select(
+            exists().where(CollectionEntry.game_id == game_id)
+        )
+    )
+
+    if game_is_referenced:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot delete a game that appears in a collection",
+        )
+
     db.delete(game)
     db.commit()
+    return
 
 @app.post(
     "/collection-entries",
@@ -297,6 +314,95 @@ def get_collection_entries(current_user: User = Depends(get_current_user), db: S
     results = db.scalars(select(CollectionEntry).where(CollectionEntry.user_id == current_user.id)).all()
 
     return results
+
+
+@app.get("/collection-entries/{entry_id}", response_model=CollectionEntryResponse)
+def get_collection_entry(entry_id: int, current_user: User = Depends(get_current_user), db:Session = Depends(get_db)):
+
+    entry = db.scalar(
+        select(CollectionEntry)
+        .where(CollectionEntry.user_id == current_user.id)
+        .where(CollectionEntry.id == entry_id)
+    )
+    
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    return entry 
+
+@app.patch("/collection-entries/{entry_id}", response_model=CollectionEntryResponse)
+def update_collection_entry(entry_id: int, update_data:CollectionEntryUpdate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+
+    entry = db.scalar(
+        select(CollectionEntry)
+        .where(CollectionEntry.user_id == current_user.id)
+        .where(CollectionEntry.id == entry_id)
+    )
+    
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    changes = update_data.model_dump(exclude_unset=True)
+
+    if not changes:
+        raise HTTPException(
+                    status_code=400,
+                    detail="Changes must be supplied",
+    )
+
+
+    final_status = changes.get(
+        "collection_status", entry.collection_status
+    )
+    final_ownership = changes.get(
+        "ownership_type", entry.ownership_type
+    )
+
+
+    if (
+        final_status == CollectionStatus.OWNED
+        and final_ownership is None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Owned entries must have an ownership type",
+        )
+
+    if (
+        final_status == CollectionStatus.WISHLIST
+        and final_ownership is not None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Wishlist entries cannot have an ownership type",
+        )
+
+
+    for field, value in changes.items():
+        setattr(entry, field, value)
+
+    db.commit()
+    db.refresh(entry)
+    return entry
+
+@app.delete("/collection-entries/{entry_id}", status_code=204)
+def delete_collection_entry(entry_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+
+    entry = db.scalar(
+        select(CollectionEntry)
+        .where(CollectionEntry.user_id == current_user.id)
+        .where(CollectionEntry.id == entry_id)
+    )
+
+    if entry is None:
+            raise HTTPException(status_code=404, detail="Entry not found")
+
+    db.delete(entry)
+    db.commit()
+    return
+
+
+
 
 
 

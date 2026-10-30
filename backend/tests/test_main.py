@@ -127,14 +127,12 @@ def test_delete_missing_game_returns_404(client):
     assert response.status_code == 404
     assert response.json() == {"detail": "Game not found"}
 
-    
+
 def test_list_games_returns_empty_list_when_no_games_exist(client):
     response = client.get("/games")
 
     assert response.status_code == 200
     assert response.json() == []
-
-
 
 def test_list_games_returns_all_games(client):
     # Create two games.
@@ -164,8 +162,7 @@ def test_list_games_returns_all_games(client):
 
     titles = {game["title"] for game in games}
     assert titles == {"Metroid Prime", "Super Mario Galaxy"}
-
-    
+ 
 def test_create_game_rejects_title_over_200_characters(client):
     response = client.post(
         "/games",
@@ -185,7 +182,6 @@ def test_create_game_rejects_missing_title(client):
 
     assert response.status_code == 422
 
-
 def test_create_game_rejects_missing_platform(client):
     response = client.post(
         "/games",
@@ -193,7 +189,6 @@ def test_create_game_rejects_missing_platform(client):
     )
 
     assert response.status_code == 422
-
 
 def test_create_user(client):
     response = client.post(
@@ -464,4 +459,162 @@ def test_collection_entry_game_relationship(db_session, user_and_game):
     db_session.commit()  
 
     assert entry.game.title == game.title
+
+def test_collection_entry_get(db_session, user_and_game, authenticated_client):
+    user, game = user_and_game
+
+    entry = CollectionEntry(
+        user_id=user.id,
+        game_id=game.id,
+        collection_status="owned",
+        ownership_type="physical",
+        play_status="unplayed",
+    )
+
+    db_session.add(entry)
+    db_session.commit() 
+
+    response = authenticated_client.get("/collection-entries")    
+
+    assert response.status_code == 200
+
+    assert len(response.json()) == 1
+
+    entries = response.json()
+    entry = entries[0]
+   
+    assert entry["game"]["title"] == game.title
+    assert entry["game"]["platform"] == game.platform
+
+    assert entry["user_id"] == user.id
+    assert entry["game_id"] == game.id
+    assert entry["collection_status"] == "owned"
+    assert entry["ownership_type"] == "physical"
+    assert entry["play_status"] == "unplayed"
+
+def test_collection_entry_get_returns_only_authenticated_users_entries(user_and_game, authenticated_client, db_session, second_user):
+    user1, game = user_and_game
+    user2 = second_user
+
+    
+    entry = CollectionEntry(
+        user_id=user1.id,
+        game_id=game.id,
+        collection_status="owned",
+        ownership_type="physical",
+        play_status="unplayed",
+    )
+
+    db_session.add(entry)
+    db_session.commit() 
+
+    entry2 = CollectionEntry(
+        user_id=user2.id,
+        game_id=game.id,
+        collection_status="owned",
+        ownership_type="digital",
+        play_status="completed",
+    )
+
+    db_session.add(entry2)
+    db_session.commit() 
+
+    response = authenticated_client.get("/collection-entries")
+
+    assert response.status_code == 200
+    
+    assert len(response.json()) == 1
+
+    returned_entries = response.json()
+    returned_entry = returned_entries[0]
+
+    
+    assert returned_entry["user_id"] == user1.id
+    assert returned_entry["ownership_type"] == "physical"
+    assert returned_entry["play_status"] == "unplayed"
+
+def test_delete_game_referenced_by_collection_returns_409(client, db_session, user_and_game):
+    user, game = user_and_game
+
+    entry = CollectionEntry(
+        user_id=user.id,
+        game_id=game.id,
+        collection_status="owned",
+        ownership_type="physical",
+        play_status="unplayed",
+    )
+
+    db_session.add(entry)
+    db_session.commit() 
+
+
+    response = client.delete(f"/games/{game.id}")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Cannot delete a game that appears in a collection"
+    )
+
+    get_response = client.get(f"/games/{game.id}")
+    assert get_response.status_code == 200
+
+def test_update_collection_entry_persists_changes(authenticated_client, db_session, user_and_game):
+    user, game = user_and_game
+    
+    entry = CollectionEntry(
+        user_id=user.id,
+        game_id=game.id,
+        collection_status="owned",
+        ownership_type="physical",
+        play_status="unplayed",
+    )
+
+    db_session.add(entry)
+    db_session.commit() 
+
+    response = authenticated_client.patch(
+        f"/collection-entries/{entry.id}",
+        json={"play_status": "completed"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["play_status"] == "completed"
+
+    response2 = authenticated_client.get("/collection-entries")
+
+    assert response2.status_code == 200
+
+    updated_entry = next(
+        item for item in response2.json()
+        if item["id"] == entry.id
+    )
+
+    assert updated_entry["play_status"] == "completed"
+
+def test_delete_collection_entry_returns_204_and_entry_is_removed(user_and_game, db_session, authenticated_client):
+    user, game = user_and_game
+
+    entry = CollectionEntry(
+        user_id=user.id,
+        game_id=game.id,
+        collection_status="owned",
+        ownership_type="physical",
+        play_status="unplayed",
+    )
+
+    db_session.add(entry)
+    db_session.commit() 
+
+    response = authenticated_client.delete(f"/collection-entries/{entry.id}")
+
+    assert response.status_code == 204
+
+    response2 = authenticated_client.get(f"/collection-entries/{entry.id}")
+
+    assert response2.status_code == 404
+
+
+
+
+
 
